@@ -27,16 +27,20 @@ This writes a map directory with
   scale factor 1, the same projection;
 - ``lanelet2_map.osm``: the source's, with each node's ``lat``/``lon``
   recomputed from its ``local_x``/``local_y`` (Autoware reads ``lat``/``lon``
-  for a projector other than ``Local``; the source's are a little off);
+  for a projector other than ``Local``; the source's are a little off), and
+  without the bounds' duplicate points, which crash Autoware's intersection
+  module (:func:`drop_duplicate_points`);
 - the point cloud map and anything else linked from the source.
 
     hils_geo_map SOURCE_MAP_DIR OUTPUT_MAP_DIR
 """
 
 import argparse
+import math
 import os
 import sys
 import xml.etree.ElementTree as ET
+from typing import Tuple
 
 #: The stock CARLA levels' OpenDRIVE geo-reference.
 CARLA_TMERC = "+proj=tmerc +lat_0=0 +lon_0=0 +k=1 +x_0=0 +y_0=0 +datum=WGS84"
@@ -66,10 +70,51 @@ def _inverse(proj: str):
     return to_geo
 
 
-def georeference_lanelets(source: str, output: str, proj: str = CARLA_TMERC) -> int:
-    """Write ``source`` (a lanelet2 .osm) to ``output`` with lat/lon from local_x/local_y.
+#: Way points closer than this to their neighbour are duplicates (m).
+DUPLICATE_POINT_DISTANCE = 1e-3
 
-    Returns the number of nodes rewritten.
+
+def drop_duplicate_points(root: ET.Element) -> int:
+    """Remove a way's points that repeat their neighbour's position; return how many.
+
+    The CARLA maps have bounds whose end point is followed (or preceded) by an
+    interior point at the very same place. Autoware resamples each lanelet's
+    bounds into its centerline, dividing by every segment's length: a zero one
+    makes the centerline NaN, and the intersection module's search for the
+    lanes before a conflicting lanelet then never ends (behavior_planning_container
+    dies of a stack overflow). The end point is kept: neighbouring lanelets share it.
+    """
+    position = {}
+    for node in root.iter("node"):
+        tags = {tag.get("k"): tag.get("v") for tag in node.iter("tag")}
+        if "local_x" in tags and "local_y" in tags:
+            position[node.get("id")] = (
+                float(tags["local_x"]),
+                float(tags["local_y"]),
+                float(tags.get("ele", tags.get("local_z", 0.0))),
+            )
+    dropped = 0
+    for way in root.iter("way"):
+        refs = way.findall("nd")
+        keep = list(refs)
+        i = 0
+        while i + 1 < len(keep):
+            a, b = position.get(keep[i].get("ref")), position.get(keep[i + 1].get("ref"))
+            if a is None or b is None or math.dist(a, b) >= DUPLICATE_POINT_DISTANCE or len(keep) <= 2:
+                i += 1
+                continue
+            # Drop the interior one of the pair; the end points stay.
+            drop = i + 1 if i + 1 < len(keep) - 1 else i
+            way.remove(keep.pop(drop))
+            dropped += 1
+    return dropped
+
+
+def georeference_lanelets(source: str, output: str, proj: str = CARLA_TMERC) -> Tuple[int, int]:
+    """Write ``source`` (a lanelet2 .osm) to ``output`` with lat/lon from local_x/local_y,
+    and without its ways' duplicate points (:func:`drop_duplicate_points`).
+
+    Returns the number of nodes rewritten and of duplicate points dropped.
     """
     to_geo = _inverse(proj)
     tree = ET.parse(source)
@@ -82,14 +127,15 @@ def georeference_lanelets(source: str, output: str, proj: str = CARLA_TMERC) -> 
         node.set("lat", repr(lat))
         node.set("lon", repr(lon))
         count += 1
+    dropped = drop_duplicate_points(tree.getroot())
     tree.write(output, encoding="UTF-8", xml_declaration=True)
-    return count
+    return count, dropped
 
 
-def write_geo_map(source_dir: str, output_dir: str, proj: str = CARLA_TMERC) -> int:
+def write_geo_map(source_dir: str, output_dir: str, proj: str = CARLA_TMERC) -> Tuple[int, int]:
     source_dir = os.path.abspath(source_dir)
     os.makedirs(output_dir, exist_ok=True)
-    count = georeference_lanelets(
+    counts = georeference_lanelets(
         os.path.join(source_dir, "lanelet2_map.osm"), os.path.join(output_dir, "lanelet2_map.osm"), proj
     )
     with open(os.path.join(output_dir, "map_projector_info.yaml"), "w") as f:
@@ -102,7 +148,7 @@ def write_geo_map(source_dir: str, output_dir: str, proj: str = CARLA_TMERC) -> 
             os.remove(link)
         # Relative, so the map also works where the data directory is mounted elsewhere (a container).
         os.symlink(os.path.relpath(os.path.join(source_dir, name), os.path.abspath(output_dir)), link)
-    return count
+    return counts
 
 
 def main(argv=None) -> int:
@@ -113,8 +159,8 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if "+proj=tmerc" not in args.proj or "+lat_0=0 " not in args.proj + " " or "+lon_0=0 " not in args.proj + " ":
         parser.error("Autoware's TransverseMercator projector here is at origin (0, 0): only such a tmerc is supported")
-    count = write_geo_map(args.source, args.output, args.proj)
-    print(f"{args.output}: {count} lanelet2 nodes georeferenced ({args.proj})")
+    count, dropped = write_geo_map(args.source, args.output, args.proj)
+    print(f"{args.output}: {count} lanelet2 nodes georeferenced ({args.proj}), {dropped} duplicate points dropped")
     return 0
 
 

@@ -15,11 +15,12 @@
 """hils_geo_map: a CARLA level's Autoware map that a GNSS receiver can localize in."""
 
 import os
+import xml.etree.ElementTree as ET
 
 import pytest
 import yaml
 
-from autoware_carla_interface_v2.hils_geo_map import write_geo_map
+from autoware_carla_interface_v2.hils_geo_map import drop_duplicate_points, write_geo_map
 
 OSM = """<?xml version="1.0" encoding="UTF-8"?>
 <osm version="0.6">
@@ -41,7 +42,7 @@ def test_lanelet_nodes_get_carlas_geolocation_and_the_rest_is_linked(tmp_path):
     (source / "map_projector_info.yaml").write_text("projector_type: Local\n")
     (source / "pointcloud_map.pcd").write_text("pcd")
 
-    assert write_geo_map(str(source), str(output)) == 1
+    assert write_geo_map(str(source), str(output)) == (1, 0)
 
     info = yaml.safe_load((output / "map_projector_info.yaml").read_text())
     assert info["projector_type"] == "TransverseMercator"
@@ -59,3 +60,35 @@ def test_lanelet_nodes_get_carlas_geolocation_and_the_rest_is_linked(tmp_path):
     link = output / "pointcloud_map.pcd"
     assert link.is_symlink() and not os.path.isabs(os.readlink(link))
     assert link.read_text() == "pcd"
+
+
+def _node(node_id, x, y):
+    return (
+        f'<node id="{node_id}" lat="0" lon="0"><tag k="local_x" v="{x}"/>'
+        f'<tag k="local_y" v="{y}"/><tag k="ele" v="0.0"/></node>'
+    )
+
+
+def _refs(way):
+    return [nd.get("ref") for nd in way.findall("nd")]
+
+
+def test_a_bound_loses_the_interior_point_that_repeats_its_end_point():
+    # Town10HD_Opt way 4638 (the left bound of lanelet 4640, which crosses the
+    # right turn 4766) starts with node 1173 and then node 4550 at the same
+    # place: Autoware's centerline of it came out NaN.
+    root = ET.fromstring(
+        "<osm>"
+        + _node(1, 0.0, 0.0) + _node(2, 0.0, 0.0) + _node(3, 5.0, 0.0)
+        + _node(4, 10.0, 0.0) + _node(5, 10.0, 0.0)
+        + '<way id="10"><nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="4"/><nd ref="5"/></way>'
+        + '<way id="11"><nd ref="1"/><nd ref="3"/></way>'
+        + "</osm>"
+    )
+
+    assert drop_duplicate_points(root) == 2
+
+    ways = {way.get("id"): way for way in root.iter("way")}
+    # The end points, which the neighbouring lanelets share, stay.
+    assert _refs(ways["10"]) == ["1", "3", "5"]
+    assert _refs(ways["11"]) == ["1", "3"]
