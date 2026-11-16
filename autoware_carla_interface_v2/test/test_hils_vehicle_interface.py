@@ -30,6 +30,7 @@ from autoware_carla_interface_v2.vehicle_interface import GEAR_REVERSE
 from autoware_carla_interface_v2.vehicle_interface import reported_gear
 
 DBC = os.path.join(os.path.dirname(__file__), "..", "config", "hils", "carla_autoware.dbc")
+TAMAGAWA_DBC = os.path.join(os.path.dirname(__file__), "..", "config", "hils", "tamagawa_imu.dbc")
 
 
 def test_map_pose_flips_y_and_yaw_and_moves_to_base_link():
@@ -75,6 +76,41 @@ def test_the_dbc_round_trips_the_messages_the_bridge_and_the_node_exchange():
     assert control.fields["SteerAngle"] == pytest.approx(-0.1234, abs=1e-4)
     assert control.fields["TargetSpeed"] == pytest.approx(4.2, abs=0.01)
     assert gnss.fields == pytest.approx({"X": -107.39, "Y": 58.15}, abs=1e-3)
+
+
+def test_vehicle_status_carries_the_yaw_rate():
+    hilspy = pytest.importorskip("hilspy")
+    with hilspy.open("mem://hils-status", f"dbc:{DBC}") as tx, hilspy.open("mem://hils-status", f"dbc:{DBC}") as rx:
+        tx.send("VehicleStatus", {"Speed": 3.5, "Steer": 0.1, "Gear": 1, "Reverse": 0, "HandBrake": 0, "YawRate": -0.25})
+        status = rx.recv(timeout=1.0)
+    assert status.name == "VehicleStatus"
+    assert status.fields["YawRate"] == pytest.approx(-0.25, abs=1e-4)
+
+
+def _tag_can_driver_decode(gyro: bytes, accel: bytes):
+    """What tamagawa_imu_driver's tag_can_driver makes of 0x319 and 0x31A."""
+
+    def i16(data, k):
+        return int.from_bytes(data[k:k + 2], "big", signed=True)
+
+    rates = [i16(gyro, k) * (200 / 2**15) * math.pi / 180 for k in (2, 4, 6)]
+    acceleration = [i16(accel, k) * (100 / 2**15) for k in (2, 4, 6)]
+    return int.from_bytes(gyro[0:2], "big"), rates, acceleration
+
+
+def test_the_tamagawa_dbc_encodes_what_tag_can_driver_decodes():
+    hilspy = pytest.importorskip("hilspy")
+    with hilspy.open("mem://hils-imu", f"dbc:{TAMAGAWA_DBC}") as tx, hilspy.open("mem://hils-imu") as rx:
+        tx.send("TAG_Gyro", {"Counter": 513, "GyroX": 12.5, "GyroY": -3.25, "GyroZ": 150.0})
+        tx.send("TAG_Accel", {"Counter": 514, "AccelX": -1.5, "AccelY": 0.75, "AccelZ": -9.80665})
+        gyro = rx.recv(timeout=1.0)
+        accel = rx.recv(timeout=1.0)
+    assert (gyro.id, accel.id) == (0x319, 0x31A)
+    counter, rates, acceleration = _tag_can_driver_decode(gyro.data, accel.data)
+    assert counter == 513
+    lsb_rate = math.radians(200 / 2**15)
+    assert rates == pytest.approx([math.radians(12.5), math.radians(-3.25), math.radians(150.0)], abs=lsb_rate)
+    assert acceleration == pytest.approx([-1.5, 0.75, -9.80665], abs=100 / 2**15)
 
 
 def test_settle_needs_the_condition_to_hold_unbroken():

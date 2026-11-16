@@ -8,8 +8,10 @@
       uv run scenario ego.entity=hils ...              (the run, on the simulation host)
 
     Autoware gets only what a car would give it: the vehicle CAN
-    (config/hils/carla_autoware.dbc, through hils_vehicle_interface) and the
-    Pandar XT32's UDP packets, decoded by Autoware's own LiDAR driver (nebula).
+    (config/hils/carla_autoware.dbc, through hils_vehicle_interface), a
+    Tamagawa IMU on that CAN (config/hils/tamagawa_imu.dbc, decoded by
+    Autoware's own tamagawa_imu_driver) and the Pandar XT32's UDP packets,
+    decoded by Autoware's own LiDAR driver (nebula).
   -->
   <arg name="map_path" description="Autoware map directory of the scenario's level"/>
   <arg name="vehicle_model" default="sample_vehicle"/>
@@ -17,6 +19,8 @@
   <arg name="data_path" default="$(env HOME)/autoware_data/ml_models"/>
   <arg name="rviz" default="false"/>
   <arg name="can_url" default="can://vcan0" description="The vehicle CAN the bridge writes (scenario-hils.yaml's vehicle_can)"/>
+  <arg name="imu_can_interface" default="vcan0" description="The CAN the bridge writes the Tamagawa IMU's frames to (scenario-hils.yaml's imu_can)"/>
+  <arg name="imu_frame_id" default="tamagawa/imu_link" description="The IMU's frame in the sensor kit, which the bridge sends its values in"/>
   <arg name="lidar_host_ip" default="127.0.0.1" description="Where the LiDAR packets arrive"/>
   <arg name="lidar_sensor_ip" default="127.0.0.1" description="Where they come from (the bridge)"/>
   <arg name="lidar_data_port" default="2368"/>
@@ -47,6 +51,21 @@
       <param name="return_mode" value="Strongest"/>
       <!-- pandar_points is PointXYZIRCAEDT, what Autoware's preprocessing reads -->
       <remap from="pandar_points" to="pointcloud_raw_ex"/>
+    </node>
+  </group>
+
+  <!-- The IMU: Autoware's own driver, on the bridge's Tamagawa CAN frames -->
+  <group>
+    <push-ros-namespace namespace="/sensing/imu"/>
+    <!-- Only the IMU's frames (0x319, 0x31A); the rest of the bus is the vehicle interface's -->
+    <include file="$(find-pkg-share ros2_socketcan)/launch/socket_can_receiver.launch.py">
+      <arg name="interface" value="$(var imu_can_interface)"/>
+      <arg name="filters" value="319:7FF,31A:7FF"/>
+      <arg name="from_can_bus_topic" value="/can/imu"/>
+    </include>
+    <node pkg="tamagawa_imu_driver" exec="tag_can_driver" name="tag_can_driver" output="screen">
+      <param name="imu_frame_id" value="$(var imu_frame_id)"/>
+      <remap from="imu/data_raw" to="/sensing/imu/tamagawa/imu_raw"/>
     </node>
   </group>
 

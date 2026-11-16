@@ -16,14 +16,18 @@
 
 ``scenario-hils`` (autoware_carla_scenario, docs/hils.md) follows the ego of a
 scenario run and sends what a vehicle's buses and sensors would: here the
-vehicle CAN described by ``config/hils/carla_autoware.dbc`` and a Velodyne
-VLP-16's UDP packets, which Autoware's own LiDAR driver (nebula) decodes. This
+vehicle CAN described by ``config/hils/carla_autoware.dbc``, a Tamagawa IMU on
+that CAN (``config/hils/tamagawa_imu.dbc``, decoded by Autoware's
+tamagawa_imu_driver) and a Hesai Pandar XT32's UDP packets, which Autoware's
+own LiDAR driver (nebula) decodes. This
 node is the vehicle interface on Autoware's side of that CAN, as it would be in
 a car:
 
-- ``VehicleStatus``, ``ImuData``, ``ImuRates``, ``GnssPosition`` / ``GnssAttitude`` (the
-  simulated GNSS: the ego's pose) become ``/vehicle/status/*``, the IMU and the
-  GNSS pose Autoware localizes from;
+- ``VehicleStatus`` (with the vehicle's own yaw rate, as an ESC reports it)
+  and ``GnssPosition`` / ``GnssAttitude`` (the simulated GNSS: the ego's pose)
+  become ``/vehicle/status/*`` and the GNSS pose Autoware localizes from;
+  the IMU is a Tamagawa IMU on the same CAN, which Autoware's own
+  tamagawa_imu_driver decodes (launch/autoware_hils.launch.xml), not this node;
 - ``/control/command/control_cmd`` goes back as ``ControlCmd``, Autoware's
   target speed, acceleration and tire angle, which the bridge applies to the
   ego as CARLA Ackermann control (``commands.mode: ackermann``);
@@ -55,7 +59,6 @@ from .vehicle_interface import GEAR_DRIVE
 from .vehicle_interface import ackermann_values
 from .vehicle_interface import reported_gear
 
-GRAVITY = 9.80665
 #: CARLA's Lincoln MKZ turns its front wheels 70 degrees at full steer.
 MKZ_MAX_STEER_ANGLE = math.radians(70.0)
 
@@ -101,9 +104,6 @@ class EgoState:
     steer: float = 0.0
     reverse: int = 0
     yaw_rate: float = 0.0
-    roll_rate: float = 0.0
-    pitch_rate: float = 0.0
-    accel: Tuple[float, float, float] = (0.0, 0.0, GRAVITY)
     position: Optional[Tuple[float, float]] = None
     z: float = 0.0
     yaw_deg: Optional[float] = None
@@ -158,7 +158,6 @@ def main(args=None):
     from autoware_vehicle_msgs.msg import TurnIndicatorsReport
     from autoware_vehicle_msgs.msg import VelocityReport
     from geometry_msgs.msg import PoseWithCovarianceStamped
-    from sensor_msgs.msg import Imu
 
     from .sensor_kit import load_sensor_kit
 
@@ -208,7 +207,6 @@ def main(args=None):
             self.pub_mode = pub(ControlModeReport, "/vehicle/status/control_mode")
             self.pub_turn = pub(TurnIndicatorsReport, "/vehicle/status/turn_indicators_status")
             self.pub_hazard = pub(HazardLightsReport, "/vehicle/status/hazard_lights_status")
-            self.pub_imu = self.create_publisher(Imu, "/sensing/imu/tamagawa/imu_raw", 10)
             self.pub_gnss = pub(PoseWithCovarianceStamped, "/sensing/gnss/pose_with_covariance")
 
             self.create_subscription(Control, "/control/command/control_cmd", self._on_control, qos, callback_group=group)
@@ -239,12 +237,11 @@ def main(args=None):
             self.receiver.start()
             self.create_timer(1.0 / self.command_rate, self._send_command, callback_group=group)
             self.create_timer(0.1, self._send_status, callback_group=group)
-            # The CAN carries VehicleStatus and ImuData at 100 Hz: the receiver
+            # The CAN carries VehicleStatus at 100 Hz: the receiver
             # only stores them, and Autoware gets them at these rates, so the
             # receiver keeps up and PowerMode is never read late.
             self.create_timer(1.0 / self.status_rate, self._publish_vehicle_status, callback_group=group)
             self.create_timer(0.1, self._publish_gnss, callback_group=group)
-            self.imu_fresh = False
 
         # ------------------------------------------------------- Autoware -> CAN
         def _on_control(self, msg):
@@ -292,12 +289,7 @@ def main(args=None):
             s = self.state
             if name == "VehicleStatus":
                 s.speed, s.steer, s.reverse = fields["Speed"], fields["Steer"], int(fields["Reverse"])
-            elif name == "ImuData":
                 s.yaw_rate = fields["YawRate"]
-                s.accel = (fields["AccelX"], fields["AccelY"], fields["AccelZ"])
-                self.imu_fresh = True
-            elif name == "ImuRates":
-                s.roll_rate, s.pitch_rate = fields["RollRate"], fields["PitchRate"]
             elif name == "GnssPosition":
                 s.position = (fields["X"], fields["Y"])
             elif name == "GnssAttitude":
@@ -307,27 +299,9 @@ def main(args=None):
                     self.ignition_seen = time.monotonic()
                 self._set_ignition(bool(fields["Ignition"]))
 
-        def _publish_imu(self, stamp):
-            s = self.state
-            if not self.imu_fresh:
-                return
-            self.imu_fresh = False
-            imu = Imu()
-            imu.header.stamp, imu.header.frame_id = stamp, "base_link"
-            imu.orientation_covariance[0] = -1.0  # no orientation estimate
-            imu.angular_velocity.x = s.roll_rate
-            imu.angular_velocity.y = s.pitch_rate
-            imu.angular_velocity.z = s.yaw_rate
-            imu.linear_acceleration.x, imu.linear_acceleration.y, imu.linear_acceleration.z = s.accel
-            for i in (0, 4, 8):
-                imu.angular_velocity_covariance[i] = 1e-4
-                imu.linear_acceleration_covariance[i] = 1e-2
-            self.pub_imu.publish(imu)
-
         def _publish_vehicle_status(self):
             s = self.state
             stamp = self.get_clock().now().to_msg()
-            self._publish_imu(stamp)
             velocity = VelocityReport()
             velocity.header.stamp, velocity.header.frame_id = stamp, "base_link"
             velocity.longitudinal_velocity = float(s.speed)

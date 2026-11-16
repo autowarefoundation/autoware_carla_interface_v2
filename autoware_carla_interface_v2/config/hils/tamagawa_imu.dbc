@@ -1,0 +1,23 @@
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_: IMU ADS
+
+BO_ 793 TAG_Gyro: 8 IMU
+ SG_ Counter : 7|16@0+ (1,0) [0|65535] "" ADS
+ SG_ GyroX : 23|16@0- (0.006103515625,0) [-200|199.993896484375] "deg/s" ADS
+ SG_ GyroY : 39|16@0- (0.006103515625,0) [-200|199.993896484375] "deg/s" ADS
+ SG_ GyroZ : 55|16@0- (0.006103515625,0) [-200|199.993896484375] "deg/s" ADS
+
+BO_ 794 TAG_Accel: 8 IMU
+ SG_ Counter : 7|16@0+ (1,0) [0|65535] "" ADS
+ SG_ AccelX : 23|16@0- (0.0030517578125,0) [-100|99.9969482421875] "m/s2" ADS
+ SG_ AccelY : 39|16@0- (0.0030517578125,0) [-100|99.9969482421875] "m/s2" ADS
+ SG_ AccelZ : 55|16@0- (0.0030517578125,0) [-100|99.9969482421875] "m/s2" ADS
+
+CM_ "A Tamagawa Seiki IMU on CAN, as tamagawa_imu_driver's tag_can_driver decodes it: big-endian int16, angular velocity in 200/2^15 deg/s and acceleration in 100/2^15 m/s2 per LSB, in the IMU's own frame (tamagawa/imu_link).";
+CM_ BO_ 793 "0x319: counter and angular velocity. tag_can_driver keeps the latest one.";
+CM_ BO_ 794 "0x31A: acceleration (specific force: +g up at rest). tag_can_driver publishes the IMU message on this one.";
