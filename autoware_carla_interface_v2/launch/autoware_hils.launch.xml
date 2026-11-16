@@ -10,8 +10,12 @@
     Autoware gets only what a car would give it: the vehicle CAN
     (config/hils/carla_autoware.dbc, through hils_vehicle_interface), a
     Tamagawa IMU on that CAN (config/hils/tamagawa_imu.dbc, decoded by
-    Autoware's own tamagawa_imu_driver) and the Pandar XT32's UDP packets,
-    decoded by Autoware's own LiDAR driver (nebula).
+    Autoware's own tamagawa_imu_driver), a Septentrio GNSS receiver's SBF on
+    TCP (septentrio_gnss_driver) and the Pandar XT32's UDP packets, decoded by
+    Autoware's own LiDAR driver (nebula).
+
+    map_path must be georeferenced as CARLA's geolocation is, for the GNSS:
+      ros2 run autoware_carla_interface_v2 hils_geo_map <CARLA level map> <output>
   -->
   <arg name="map_path" description="Autoware map directory of the scenario's level"/>
   <arg name="vehicle_model" default="sample_vehicle"/>
@@ -21,6 +25,8 @@
   <arg name="can_url" default="can://vcan0" description="The vehicle CAN the bridge writes (scenario-hils.yaml's vehicle_can)"/>
   <arg name="imu_can_interface" default="vcan0" description="The CAN the bridge writes the Tamagawa IMU's frames to (scenario-hils.yaml's imu_can)"/>
   <arg name="imu_frame_id" default="tamagawa/imu_link" description="The IMU's frame in the sensor kit, which the bridge sends its values in"/>
+  <arg name="gnss_param_path" default="$(find-pkg-share autoware_carla_interface_v2)/config/hils/septentrio_gnss.param.yaml"
+       description="septentrio_gnss_driver parameters: the bridge's SBF stream on TCP, NavSatFix only"/>
   <arg name="lidar_host_ip" default="127.0.0.1" description="Where the LiDAR packets arrive"/>
   <arg name="lidar_sensor_ip" default="127.0.0.1" description="Where they come from (the bridge)"/>
   <arg name="lidar_data_port" default="2368"/>
@@ -68,6 +74,13 @@
       <remap from="imu/data_raw" to="/sensing/imu/tamagawa/imu_raw"/>
     </node>
   </group>
+
+  <!-- The GNSS: Autoware's own driver, on the bridge's Septentrio SBF stream.
+       Its NavSatFix goes where the sensor kit's gnss_poser reads it. -->
+  <node pkg="septentrio_gnss_driver" exec="septentrio_gnss_driver_node" name="septentrio_gnss_driver" output="screen">
+    <param from="$(var gnss_param_path)"/>
+    <remap from="navsatfix" to="/sensing/gnss/ublox/nav_sat_fix"/>
+  </node>
 
   <!-- The vehicle interface: the CAN on Autoware's side -->
   <node pkg="autoware_carla_interface_v2" exec="hils_vehicle_interface" name="hils_vehicle_interface" output="screen">

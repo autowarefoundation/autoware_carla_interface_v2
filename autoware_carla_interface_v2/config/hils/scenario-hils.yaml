@@ -25,13 +25,6 @@ devices:
         period: 0.01
         fields: {Speed: $longitudinal_velocity, Steer: $steer, Gear: $gear,
                  Reverse: $reverse, HandBrake: $hand_brake, YawRate: $yaw_rate_rad}
-      # A simulated GNSS: the ego's pose, which Autoware initializes from.
-      - name: GnssPosition
-        period: 0.1
-        fields: {X: $x, Y: $y}
-      - name: GnssAttitude
-        period: 0.1
-        fields: {Z: $z, Yaw: $yaw}
       # On while a scenario runs; scenario_end sends it off.
       - name: PowerMode
         period: 0.1
@@ -72,6 +65,29 @@ devices:
           AccelY: $lateral_acceleration
           # Specific force: +g up at rest, which is the IMU's -z.
           AccelZ: {signal: vertical_acceleration, scale: -1.0, offset: -9.80665}
+
+  # A Septentrio GNSS receiver streaming SBF on TCP, which Autoware's
+  # septentrio_gnss_driver reads (config/hils/septentrio_gnss.param.yaml): its
+  # NavSatFix needs PVTGeodetic and PosCovGeodetic of the same epoch, which
+  # the `epoch` option gives them. Latitude/longitude are CARLA's geolocation
+  # (the level's OpenDRIVE tmerc), so Autoware needs the map from
+  # `hils_geo_map` (TransverseMercator at 0/0). They are the vehicle origin's,
+  # not an antenna's: Autoware gets them as gnss_link's and initializes from
+  # them with an NDT search, as from a single-antenna receiver.
+  gnss:
+    url: tcp://127.0.0.1:28784?listen
+    codec: sbf
+    options: {epoch: 0.1}
+    messages:
+      - name: PVTGeodetic
+        period: 0.1
+        fields: {mode: 4, latitude: $latitude_rad, longitude: $longitude_rad,
+                 height: $altitude, undulation: 0.0, vn: $velocity_north,
+                 ve: $velocity_east, vu: $velocity_up, nr_sv: 14}
+      # RTK fixed: 2 cm horizontal, 3 cm vertical (m^2).
+      - name: PosCovGeodetic
+        period: 0.1
+        fields: {mode: 4, cov_latlat: 0.0004, cov_lonlon: 0.0004, cov_hgthgt: 0.0009}
 
   # A Hesai Pandar XT32 where the AWSIM sensor kit has velodyne_top
   # (base_link -> sensor_kit_base_link -> velodyne_top, in CARLA's vehicle frame).

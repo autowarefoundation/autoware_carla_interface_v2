@@ -14,14 +14,6 @@ BO_ 256 VehicleStatus: 8 SIM
  SG_ HandBrake : 41|1@1+ (1,0) [0|1] "" ADS
  SG_ YawRate : 48|16@1- (0.0001,0) [-3.2768|3.2767] "rad/s" ADS
 
-BO_ 258 GnssPosition: 8 SIM
- SG_ X : 0|32@1- (0.001,0) [-2147483.648|2147483.647] "m" ADS
- SG_ Y : 32|32@1- (0.001,0) [-2147483.648|2147483.647] "m" ADS
-
-BO_ 259 GnssAttitude: 8 SIM
- SG_ Z : 0|32@1- (0.001,0) [-2147483.648|2147483.647] "m" ADS
- SG_ Yaw : 32|16@1- (0.01,0) [-327.68|327.67] "deg" ADS
-
 BO_ 272 PowerMode: 8 SIM
  SG_ Ignition : 0|1@1+ (1,0) [0|1] "" ADS
 
@@ -36,6 +28,4 @@ BO_ 528 EcuStatus: 8 ADS
  SG_ Engaged : 1|1@1+ (1,0) [0|1] "" SIM
 
 CM_ BO_ 256 "Ego state, from scenario-hils signals: Speed = longitudinal_velocity, Steer = CARLA steer (positive right), YawRate = the vehicle's own yaw rate (counter-clockwise positive), as a vehicle's ESC reports it.";
-CM_ BO_ 258 "Simulated GNSS: the ego's CARLA x/y (vehicle origin), in metres.";
-CM_ BO_ 259 "Simulated GNSS: CARLA z and yaw (degrees, clockwise seen from above).";
 CM_ BO_ 512 "Autoware control_cmd as CARLA Ackermann control: TargetSpeed signed (negative = reverse), SteerAngle left-positive tire angle.";

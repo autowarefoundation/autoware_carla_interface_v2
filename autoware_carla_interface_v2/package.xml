@@ -18,11 +18,13 @@
   <exec_depend>builtin_interfaces</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>nebula_hesai</exec_depend>
+  <exec_depend>python3-pyproj</exec_depend>
   <exec_depend>python3-typesafe-carla-pip</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>ros2_socketcan</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>septentrio_gnss_driver</exec_depend>
   <exec_depend>tamagawa_imu_driver</exec_depend>
 
   <test_depend>python3-pytest</test_depend>
