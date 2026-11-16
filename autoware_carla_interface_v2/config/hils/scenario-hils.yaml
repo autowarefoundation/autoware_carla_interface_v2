@@ -79,11 +79,15 @@ devices:
     codec: sbf
     options: {epoch: 0.1}
     messages:
+      # latency: the block goes out at its epoch. Left out it is Do-Not-Use
+      # (65535 x 0.1 ms), which septentrio_gnss_driver's latency_compensation
+      # takes for 6.55 s and back-dates the NavSatFix past pose_initializer's
+      # gnss_pose_timeout.
       - name: PVTGeodetic
         period: 0.1
         fields: {mode: 4, latitude: $latitude_rad, longitude: $longitude_rad,
                  height: $altitude, undulation: 0.0, vn: $velocity_north,
-                 ve: $velocity_east, vu: $velocity_up, nr_sv: 14}
+                 ve: $velocity_east, vu: $velocity_up, nr_sv: 14, latency: 0}
       # RTK fixed: 2 cm horizontal, 3 cm vertical (m^2).
       - name: PosCovGeodetic
         period: 0.1
