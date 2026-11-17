@@ -16,14 +16,17 @@
 
 ``scenario-hils`` (autoware_carla_scenario, docs/hils.md) follows the ego of a
 scenario run and sends what a vehicle's buses and sensors would: here the
-vehicle CAN described by ``config/hils/carla_autoware.dbc`` and a Velodyne
-VLP-16's UDP packets, which Autoware's own LiDAR driver (nebula) decodes. This
+vehicle CAN described by ``config/hils/carla_autoware.dbc``, a Tamagawa IMU on
+that CAN (``config/hils/tamagawa_imu.dbc``, decoded by Autoware's
+tamagawa_imu_driver) and a Hesai Pandar XT32's UDP packets, which Autoware's
+own LiDAR driver (nebula) decodes. This
 node is the vehicle interface on Autoware's side of that CAN, as it would be in
 a car:
 
-- ``VehicleStatus``, ``ImuData``, ``ImuRates``, ``GnssPosition`` / ``GnssAttitude`` (the
-  simulated GNSS: the ego's pose) become ``/vehicle/status/*``, the IMU and the
-  GNSS pose Autoware localizes from;
+- ``VehicleStatus`` (with the vehicle's own yaw rate, as an ESC reports it)
+  becomes ``/vehicle/status/*``. The IMU (a Tamagawa IMU on the same CAN) and
+  the GNSS (a Septentrio receiver's SBF on TCP) are decoded by Autoware's own
+  drivers (launch/autoware_hils.launch.xml), not by this node;
 - ``/control/command/control_cmd`` goes back as ``ControlCmd``, Autoware's
   target speed, acceleration and tire angle, which the bridge applies to the
   ego as CARLA Ackermann control (``commands.mode: ackermann``);
@@ -48,32 +51,17 @@ import threading
 import time
 from typing import Callable
 from typing import Optional
-from typing import Tuple
 
 from .transforms import yaw_to_quaternion
 from .vehicle_interface import GEAR_DRIVE
 from .vehicle_interface import ackermann_values
 from .vehicle_interface import reported_gear
 
-GRAVITY = 9.80665
 #: CARLA's Lincoln MKZ turns its front wheels 70 degrees at full steer.
 MKZ_MAX_STEER_ANGLE = math.radians(70.0)
 
 
 # ------------------------------------------------------------ conversions
-def map_pose_from_carla(x: float, y: float, z: float, yaw_deg: float, base_link_x: float) -> Tuple[float, float, float, float]:
-    """The pose of ``base_link`` in Autoware's map frame, from CARLA's ego pose.
-
-    CARLA is left-handed (y to the right, yaw clockwise); the map frame is
-    right-handed, so y and yaw change sign. ``base_link_x`` is where base_link
-    sits along the vehicle's x from CARLA's vehicle origin (negative: behind).
-    """
-    yaw = -math.radians(yaw_deg)
-    map_x = x + base_link_x * math.cos(yaw)
-    map_y = -y + base_link_x * math.sin(yaw)
-    return map_x, map_y, z, yaw
-
-
 def tire_angle_from_steer(steer: float, max_steer_angle: float = MKZ_MAX_STEER_ANGLE) -> float:
     """Autoware's steering tire angle (rad, left-positive) from CARLA's steer (right-positive)."""
     return -float(steer) * max_steer_angle
@@ -101,12 +89,6 @@ class EgoState:
     steer: float = 0.0
     reverse: int = 0
     yaw_rate: float = 0.0
-    roll_rate: float = 0.0
-    pitch_rate: float = 0.0
-    accel: Tuple[float, float, float] = (0.0, 0.0, GRAVITY)
-    position: Optional[Tuple[float, float]] = None
-    z: float = 0.0
-    yaw_deg: Optional[float] = None
 
 
 # ------------------------------------------------------------------ node
@@ -158,9 +140,6 @@ def main(args=None):
     from autoware_vehicle_msgs.msg import TurnIndicatorsReport
     from autoware_vehicle_msgs.msg import VelocityReport
     from geometry_msgs.msg import PoseWithCovarianceStamped
-    from sensor_msgs.msg import Imu
-
-    from .sensor_kit import load_sensor_kit
 
     class HilsVehicleInterface(Node):
         def __init__(self):
@@ -168,8 +147,6 @@ def main(args=None):
             p = self.declare_parameter
             self.can_url = p("can_url", "can://vcan0").value
             self.dbc_file = p("dbc_file", "").value or _package_file("config", "hils", "carla_autoware.dbc")
-            sensor_kit_file = p("sensor_kit_file", "").value or _package_file("config", "sensor_kit.yaml")
-            self.base_link_x = load_sensor_kit(sensor_kit_file).base_link.x
             self.max_steer_angle = p("max_steer_angle", MKZ_MAX_STEER_ANGLE).value
             self.command_rate = p("command_rate_hz", 50.0).value
             self.goal = (p("goal_x", 0.0).value, p("goal_y", 0.0).value, p("goal_yaw", 0.0).value)
@@ -208,8 +185,12 @@ def main(args=None):
             self.pub_mode = pub(ControlModeReport, "/vehicle/status/control_mode")
             self.pub_turn = pub(TurnIndicatorsReport, "/vehicle/status/turn_indicators_status")
             self.pub_hazard = pub(HazardLightsReport, "/vehicle/status/hazard_lights_status")
-            self.pub_imu = self.create_publisher(Imu, "/sensing/imu/tamagawa/imu_raw", 10)
-            self.pub_gnss = pub(PoseWithCovarianceStamped, "/sensing/gnss/pose_with_covariance")
+            # The GNSS pose gnss_poser makes of the receiver's NavSatFix: Autoware
+            # initializes from it, and this node only waits for it to flow.
+            self.gnss_seen = None
+            self.create_subscription(
+                PoseWithCovarianceStamped, "/sensing/gnss/pose_with_covariance",
+                lambda _: setattr(self, "gnss_seen", time.monotonic()), 10, callback_group=group)
 
             self.create_subscription(Control, "/control/command/control_cmd", self._on_control, qos, callback_group=group)
             self.create_subscription(GearCommand, "/control/command/gear_cmd", self._on_gear, qos, callback_group=group)
@@ -239,12 +220,10 @@ def main(args=None):
             self.receiver.start()
             self.create_timer(1.0 / self.command_rate, self._send_command, callback_group=group)
             self.create_timer(0.1, self._send_status, callback_group=group)
-            # The CAN carries VehicleStatus and ImuData at 100 Hz: the receiver
+            # The CAN carries VehicleStatus at 100 Hz: the receiver
             # only stores them, and Autoware gets them at these rates, so the
             # receiver keeps up and PowerMode is never read late.
             self.create_timer(1.0 / self.status_rate, self._publish_vehicle_status, callback_group=group)
-            self.create_timer(0.1, self._publish_gnss, callback_group=group)
-            self.imu_fresh = False
 
         # ------------------------------------------------------- Autoware -> CAN
         def _on_control(self, msg):
@@ -292,42 +271,15 @@ def main(args=None):
             s = self.state
             if name == "VehicleStatus":
                 s.speed, s.steer, s.reverse = fields["Speed"], fields["Steer"], int(fields["Reverse"])
-            elif name == "ImuData":
                 s.yaw_rate = fields["YawRate"]
-                s.accel = (fields["AccelX"], fields["AccelY"], fields["AccelZ"])
-                self.imu_fresh = True
-            elif name == "ImuRates":
-                s.roll_rate, s.pitch_rate = fields["RollRate"], fields["PitchRate"]
-            elif name == "GnssPosition":
-                s.position = (fields["X"], fields["Y"])
-            elif name == "GnssAttitude":
-                s.z, s.yaw_deg = fields["Z"], fields["Yaw"]
             elif name == "PowerMode":
                 if fields["Ignition"]:
                     self.ignition_seen = time.monotonic()
                 self._set_ignition(bool(fields["Ignition"]))
 
-        def _publish_imu(self, stamp):
-            s = self.state
-            if not self.imu_fresh:
-                return
-            self.imu_fresh = False
-            imu = Imu()
-            imu.header.stamp, imu.header.frame_id = stamp, "base_link"
-            imu.orientation_covariance[0] = -1.0  # no orientation estimate
-            imu.angular_velocity.x = s.roll_rate
-            imu.angular_velocity.y = s.pitch_rate
-            imu.angular_velocity.z = s.yaw_rate
-            imu.linear_acceleration.x, imu.linear_acceleration.y, imu.linear_acceleration.z = s.accel
-            for i in (0, 4, 8):
-                imu.angular_velocity_covariance[i] = 1e-4
-                imu.linear_acceleration_covariance[i] = 1e-2
-            self.pub_imu.publish(imu)
-
         def _publish_vehicle_status(self):
             s = self.state
             stamp = self.get_clock().now().to_msg()
-            self._publish_imu(stamp)
             velocity = VelocityReport()
             velocity.header.stamp, velocity.header.frame_id = stamp, "base_link"
             velocity.longitudinal_velocity = float(s.speed)
@@ -340,24 +292,6 @@ def main(args=None):
             self.pub_mode.publish(ControlModeReport(stamp=stamp, mode=ControlModeReport.AUTONOMOUS))
             self.pub_turn.publish(TurnIndicatorsReport(stamp=stamp, report=TurnIndicatorsReport.DISABLE))
             self.pub_hazard.publish(HazardLightsReport(stamp=stamp, report=HazardLightsReport.DISABLE))
-
-        def _gnss_pose(self, stamp):
-            s = self.state
-            if s.position is None or s.yaw_deg is None:
-                return None
-            x, y, z, yaw = map_pose_from_carla(s.position[0], s.position[1], s.z, s.yaw_deg, self.base_link_x)
-            pose = PoseWithCovarianceStamped()
-            pose.header.stamp, pose.header.frame_id = stamp, "map"
-            pose.pose.pose.position.x, pose.pose.pose.position.y, pose.pose.pose.position.z = x, y, z
-            pose.pose.pose.orientation.z, pose.pose.pose.orientation.w = yaw_to_quaternion(yaw)
-            for i, value in zip((0, 7, 14, 21, 28, 35), (0.04, 0.04, 0.1, 0.01, 0.01, 0.01)):
-                pose.pose.covariance[i] = value
-            return pose
-
-        def _publish_gnss(self):
-            pose = self._gnss_pose(self.get_clock().now().to_msg())
-            if pose is not None:
-                self.pub_gnss.publish(pose)
 
         # ------------------------------------------------------------ lifecycle
         def _set_ignition(self, on):
@@ -416,12 +350,13 @@ def main(args=None):
                 return
             self.ready = True
             self.get_logger().info("Autoware awake: EcuStatus.Ready = 1")
-            if not self._wait(lambda: self.state.position is not None and self.state.yaw_deg is not None, session):
-                self.get_logger().error("No GNSS pose on the CAN; cannot initialize localization")
+            # As a car with a single-antenna receiver: no pose given, so
+            # Autoware's pose_initializer takes the GNSS position and finds the
+            # heading with its NDT search.
+            if not self._wait(lambda: self.gnss_seen is not None and time.monotonic() - self.gnss_seen < 1.0, session):
+                self.get_logger().error("No GNSS pose from gnss_poser; cannot initialize localization")
                 return
             request = InitializeLocalization.Request()
-            pose = self._gnss_pose(self.get_clock().now().to_msg())
-            request.pose = [pose]
             if not self._call(self.srv_initialize, request, "localization initialize", session):
                 return
             initialized = LocalizationInitializationState.INITIALIZED

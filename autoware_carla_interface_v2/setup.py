@@ -28,6 +28,7 @@ setup(
             "autoware_carla_interface_v2 = autoware_carla_interface_v2.node:main",
             "spectator_follow = autoware_carla_interface_v2.spectator_follow:main",
             "hils_vehicle_interface = autoware_carla_interface_v2.hils_vehicle_interface:main",
+            "hils_geo_map = autoware_carla_interface_v2.hils_geo_map:main",
         ],
     },
 )

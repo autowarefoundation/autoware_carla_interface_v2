@@ -22,7 +22,6 @@ import pytest
 from autoware_carla_interface_v2.hils_vehicle_interface import MKZ_MAX_STEER_ANGLE
 from autoware_carla_interface_v2.hils_vehicle_interface import Settle
 from autoware_carla_interface_v2.hils_vehicle_interface import control_cmd_fields
-from autoware_carla_interface_v2.hils_vehicle_interface import map_pose_from_carla
 from autoware_carla_interface_v2.hils_vehicle_interface import tire_angle_from_steer
 from autoware_carla_interface_v2.vehicle_interface import GEAR_DRIVE
 from autoware_carla_interface_v2.vehicle_interface import GEAR_PARK
@@ -30,18 +29,7 @@ from autoware_carla_interface_v2.vehicle_interface import GEAR_REVERSE
 from autoware_carla_interface_v2.vehicle_interface import reported_gear
 
 DBC = os.path.join(os.path.dirname(__file__), "..", "config", "hils", "carla_autoware.dbc")
-
-
-def test_map_pose_flips_y_and_yaw_and_moves_to_base_link():
-    # Heading CARLA +y (yaw +90 deg, clockwise) is map -y (yaw -90 deg).
-    x, y, z, yaw = map_pose_from_carla(10.0, 20.0, 0.5, 90.0, base_link_x=-1.5)
-    assert yaw == pytest.approx(-math.pi / 2)
-    # base_link is 1.5 m behind the origin, i.e. towards map +y here.
-    assert (x, y, z) == pytest.approx((10.0, -20.0 + 1.5, 0.5))
-
-
-def test_map_pose_at_zero_yaw_only_shifts_x():
-    assert map_pose_from_carla(1.0, -2.0, 0.0, 0.0, -1.0) == pytest.approx((0.0, 2.0, 0.0, 0.0))
+TAMAGAWA_DBC = os.path.join(os.path.dirname(__file__), "..", "config", "hils", "tamagawa_imu.dbc")
 
 
 def test_tire_angle_is_left_positive_and_scaled_to_the_wheel_limit():
@@ -68,13 +56,45 @@ def test_the_dbc_round_trips_the_messages_the_bridge_and_the_node_exchange():
     hilspy = pytest.importorskip("hilspy")
     with hilspy.open("mem://hils-test", f"dbc:{DBC}") as tx, hilspy.open("mem://hils-test", f"dbc:{DBC}") as rx:
         tx.send("ControlCmd", control_cmd_fields(-0.1234, 4.2, 0.5, 0.0, GEAR_DRIVE))
-        tx.send("GnssPosition", {"X": -107.39, "Y": 58.15})
         control = rx.recv(timeout=1.0)
-        gnss = rx.recv(timeout=1.0)
     assert control.name == "ControlCmd"
     assert control.fields["SteerAngle"] == pytest.approx(-0.1234, abs=1e-4)
     assert control.fields["TargetSpeed"] == pytest.approx(4.2, abs=0.01)
-    assert gnss.fields == pytest.approx({"X": -107.39, "Y": 58.15}, abs=1e-3)
+
+
+def test_vehicle_status_carries_the_yaw_rate():
+    hilspy = pytest.importorskip("hilspy")
+    with hilspy.open("mem://hils-status", f"dbc:{DBC}") as tx, hilspy.open("mem://hils-status", f"dbc:{DBC}") as rx:
+        tx.send("VehicleStatus", {"Speed": 3.5, "Steer": 0.1, "Gear": 1, "Reverse": 0, "HandBrake": 0, "YawRate": -0.25})
+        status = rx.recv(timeout=1.0)
+    assert status.name == "VehicleStatus"
+    assert status.fields["YawRate"] == pytest.approx(-0.25, abs=1e-4)
+
+
+def _tag_can_driver_decode(gyro: bytes, accel: bytes):
+    """What tamagawa_imu_driver's tag_can_driver makes of 0x319 and 0x31A."""
+
+    def i16(data, k):
+        return int.from_bytes(data[k:k + 2], "big", signed=True)
+
+    rates = [i16(gyro, k) * (200 / 2**15) * math.pi / 180 for k in (2, 4, 6)]
+    acceleration = [i16(accel, k) * (100 / 2**15) for k in (2, 4, 6)]
+    return int.from_bytes(gyro[0:2], "big"), rates, acceleration
+
+
+def test_the_tamagawa_dbc_encodes_what_tag_can_driver_decodes():
+    hilspy = pytest.importorskip("hilspy")
+    with hilspy.open("mem://hils-imu", f"dbc:{TAMAGAWA_DBC}") as tx, hilspy.open("mem://hils-imu") as rx:
+        tx.send("TAG_Gyro", {"Counter": 513, "GyroX": 12.5, "GyroY": -3.25, "GyroZ": 150.0})
+        tx.send("TAG_Accel", {"Counter": 514, "AccelX": -1.5, "AccelY": 0.75, "AccelZ": -9.80665})
+        gyro = rx.recv(timeout=1.0)
+        accel = rx.recv(timeout=1.0)
+    assert (gyro.id, accel.id) == (0x319, 0x31A)
+    counter, rates, acceleration = _tag_can_driver_decode(gyro.data, accel.data)
+    assert counter == 513
+    lsb_rate = math.radians(200 / 2**15)
+    assert rates == pytest.approx([math.radians(12.5), math.radians(-3.25), math.radians(150.0)], abs=lsb_rate)
+    assert acceleration == pytest.approx([-1.5, 0.75, -9.80665], abs=100 / 2**15)
 
 
 def test_settle_needs_the_condition_to_hold_unbroken():
